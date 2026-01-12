@@ -1,0 +1,121 @@
+#mpiexec -n 8 lmp -in DataOutput.in
+#Foundation---------------------------------------------------------------
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+timestep        0.001
+neighbor        2 bin
+neigh_modify    every 1 delay 0 check yes
+
+#Geometry---------------------------------------------------------------
+region          box block 0 50 0 50 -15 200 units box
+create_box      3 box
+
+#substrate---------------------------------------------------------------
+variable        a equal 2.906
+variable        c equal 2.837
+lattice         custom $a a1 1.0 0.0 0.0 a2 -0.5 0.866025 0.0 a3 0.0 0.0 0.976 &
+                basis 0.0 0.0 0.0 &
+                basis 0.6666 0.3333 0.5 &
+				orient z 0 0 1
+region          substrate block INF INF INF INF 0 88 units box
+create_atoms    1 region substrate basis 1 1 basis 2 2
+
+#coating---------------------------------------------------------------
+lattice         diamond 3.567 &
+                orient x 1 -1 0 &
+                orient y 1 1 -2 &
+                orient z 1 1 1
+region          coating block INF INF INF INF 90 100 units box
+create_atoms    3 region coating
+
+#crack---------------------------------------------------------------
+#region          crack block INF 8 INF INF 86 93 units box
+#delete_atoms    region crack
+
+#set mass---------------------------------------------------------------
+mass            1 183.84  # W (substrate)
+mass            2 12.01   # C (substrate)
+mass            3 12.01   # C (diamond)
+
+#potential---------------------------------------------------------------
+pair_style     hybrid tersoff morse 2.5 lj/cut 7.0
+
+pair_coeff      * * tersoff SiC.tersoff NULL NULL C
+
+pair_coeff      1 2 morse 1.0 1.8 2.20  # W (sub) - C (sub)
+pair_coeff      1 1 morse 0.8 1.4 2.90	# W (sub) - W (sub)
+pair_coeff      2 2 morse 0.5 2.0 2.50	# C (sub) - C (sub)
+
+pair_coeff      1 3 lj/cut 0.1 2.80  # W (sub) - C (dia)
+pair_coeff      2 3 lj/cut 0.05 3.40  # C (sub) - C (dia)
+
+write_data      diamond_on_wc.data
+
+#Group---------------------------------------------------------------
+region          bottom_fixed block INF INF INF INF 0.0 10.0 units box
+group           anchor region bottom_fixed
+
+region          top_grip block INF INF INF INF 90.0 100.0 units box
+group           grip region top_grip
+
+group           frozen_zones union anchor grip
+group           mobile subtract all frozen_zones
+
+region     		r_sub_top block INF INF INF INF 83 88 units box
+group      		sub_top region r_sub_top
+
+region     		r_sub_bot block INF INF INF INF 0 5 units box
+group      		sub_bot region r_sub_bot
+		
+region     		r_coat_bot block INF INF INF INF 90 93 units box
+group      		coat_bot region r_coat_bot
+		
+region     		r_coat_top block INF INF INF INF 97 100 units box
+group      		coat_top region r_coat_top
+
+#initialize velocity----------------------------------------------------------------------------
+velocity mobile create 0.1 123456 dist gaussian units box
+velocity anchor set 0.0 0.0 0.0 units box
+velocity grip set 0.0 0.0 0.0 units box
+
+#energy minimize----------------------------------------------------------------------------
+min_style cg
+minimize 1e-4 1e-6 10000 100000
+
+#relax-----------------------------------------------------------------------------------------
+reset_timestep  0
+fix 1 frozen_zones setforce 0.0 0.0 0.0
+fix 2 all npt temp 0.1 0.1 1.0 x 0 0 1.0 y 0 0 1.0
+thermo                 1000
+thermo_modify          lost ignore
+run                    20000
+unfix                  2
+unfix                  1
+reset_timestep         0
+
+#stretch--------------------------------------------------------------------------------------
+thermo                 1000
+fix 4 anchor setforce 0.0 0.0 0.0
+fix 5 mobile nvt temp 0.1 0.1 0.01
+fix 6 grip move linear 0.0 0.0 0.1 units box
+
+#compute-----------------------------------------------------------------------------------------
+#Stress-Strain************************************************************
+compute     fzGrip grip reduce sum fz
+variable    Area equal lx*ly
+variable    StressGPa equal (c_fzGrip/v_Area)*160.21766
+variable    v_pull equal 0.1
+variable    L0 equal 100.0  # Approximate initial height of your system
+variable    Strain equal (step*dt*v_v_pull)/v_L0
+#Stress-separation************************************************************
+variable    z_sub  equal xcm(sub_top,z)
+variable    z_coat equal xcm(coat_bot,z)
+variable    separation equal (v_z_coat-v_z_sub)
+
+#output--------------------------------------------------------------------------------------
+dump                1 all atom 1000 deform.dump
+fix                 SSS all ave/time 1 1000 1000 v_StressGPa v_separation v_Strain file stress_strain.txt
+#fix                 TS all ave/time 1 100 100 v_separation v_StressGPa file traction_separation.txt
+run                 200000
